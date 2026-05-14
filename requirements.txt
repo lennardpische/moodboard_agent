@@ -1,0 +1,10 @@
+gradio>=6.14.0
+huggingface_hub>=1.0
+open_clip_torch>=2.26.1
+torch>=2.2.0
+torchvision>=0.17.0
+ddgs>=9.0.0
+pillow>=10.0.0
+requests>=2.31.0
+numpy>=1.26.0
+audioop-lts>=0.2.1; python_version >= "3.13"

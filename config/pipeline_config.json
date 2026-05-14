@@ -1,0 +1,42 @@
+{
+  "default_target_count": 36,
+  "max_candidates_per_source": 24,
+  "sources": [
+    {
+      "name": "Pinterest",
+      "adapter": "mock",
+      "priority": 1,
+      "notes": "Good for broad visual taste, adjacent references, and mood clustering."
+    },
+    {
+      "name": "ShotDeck",
+      "adapter": "mock",
+      "priority": 2,
+      "notes": "Good for cinematic stills, color, lighting, lens language, and composition."
+    },
+    {
+      "name": "Web Image Search",
+      "adapter": "mock",
+      "priority": 3,
+      "notes": "Good fallback for artist names, film titles, studios, and public reference material."
+    },
+    {
+      "name": "Manual Example Expansion",
+      "adapter": "mock",
+      "priority": 4,
+      "notes": "Used when the user provides one or two seed examples."
+    }
+  ],
+  "scoring_weights": {
+    "style_match": 0.36,
+    "visual_variety": 0.18,
+    "composition_value": 0.16,
+    "prompting_utility": 0.18,
+    "rights_safety": 0.12
+  },
+  "review_thresholds": {
+    "accept": 0.72,
+    "manual_review": 0.56
+  }
+}
+

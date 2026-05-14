@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Moodboard Agent Dashboard</title>
+    <link rel="stylesheet" href="/dashboard/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="workspace">
+        <aside class="control-panel">
+          <div class="brand">
+            <span class="brand-mark">MA</span>
+            <div>
+              <h1>Moodboard Agent</h1>
+              <p>Style directive to curated reference board</p>
+            </div>
+          </div>
+
+          <form id="run-form" class="run-form">
+            <label>
+              Style directive
+              <textarea id="directive" rows="5">Pixar style animated feature, warm family adventure, expressive characters</textarea>
+            </label>
+            <label>
+              Manual examples
+              <textarea id="examples" rows="4" placeholder="Optional URLs or notes, one per line"></textarea>
+            </label>
+            <label>
+              Target images
+              <input id="target-count" type="number" min="8" max="60" value="36">
+            </label>
+            <button type="submit" id="run-button">Run workflow</button>
+          </form>
+
+          <div class="status-block">
+            <span class="status-dot"></span>
+            <span id="status-text">Loading latest run</span>
+          </div>
+        </aside>
+
+        <section class="results">
+          <header class="results-header">
+            <div>
+              <p id="run-meta" class="eyebrow">No run loaded</p>
+              <h2 id="run-title">Reference board</h2>
+            </div>
+            <div class="metric-row">
+              <div class="metric">
+                <span id="selected-count">0</span>
+                <label>Selected</label>
+              </div>
+              <div class="metric">
+                <span id="rejected-count">0</span>
+                <label>Rejected</label>
+              </div>
+              <div class="metric">
+                <span id="source-count">0</span>
+                <label>Sources</label>
+              </div>
+            </div>
+          </header>
+
+          <section class="brief-grid">
+            <article class="panel">
+              <h3>Style Brief</h3>
+              <p id="brief-summary"></p>
+              <div id="brief-tags" class="tag-list"></div>
+            </article>
+            <article class="panel">
+              <h3>Source Plan</h3>
+              <div id="source-plan" class="source-plan"></div>
+            </article>
+            <article class="panel">
+              <h3>Next Actions</h3>
+              <ul id="next-actions" class="action-list"></ul>
+            </article>
+          </section>
+
+          <section class="board-section">
+            <div class="section-title">
+              <h3>Selected References</h3>
+              <span id="score-note">Sorted by agent score</span>
+            </div>
+            <div id="image-grid" class="image-grid"></div>
+          </section>
+        </section>
+      </section>
+    </main>
+    <script src="/dashboard/app.js"></script>
+  </body>
+</html>
+
