@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import math
+import random as _random_stdlib
 import tempfile
 import time
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeout
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,8 @@ class RetrievalConfig:
     request_timeout_seconds: int = 12
     model_name: str = "ViT-B-32"
     pretrained: str = "laion2b_s34b_b79k"
+    exploration: float = 0.25
+    random_seed: int | None = None
 
 
 @dataclass
@@ -47,6 +51,8 @@ class RetrievalResult:
     raw_candidate_count: int
     downloaded_count: int
     model_name: str
+    exploration: float = 0.0
+    used_seed: int = 0
 
 
 class RetrievalDependencyError(RuntimeError):
@@ -59,10 +65,15 @@ def run_live_retrieval(
     config: RetrievalConfig | None = None,
 ) -> RetrievalResult:
     active_config = config or RetrievalConfig()
+
+    used_seed = active_config.random_seed if active_config.random_seed is not None else _random_stdlib.randint(0, 2**31 - 1)
+    rng = _random_stdlib.Random(used_seed)
+
     request = MoodboardRequest(directive=directive, examples=seed_image_paths or [], target_count=active_config.target_count)
     brief = analyze_style(request)
 
-    raw_candidates = search_image_candidates(brief.search_queries, active_config.candidate_count)
+    queries = _apply_query_variation(brief.search_queries, active_config.exploration, rng)
+    raw_candidates = search_image_candidates(queries, active_config.candidate_count)
     downloaded = download_candidates(raw_candidates, active_config)
     if not downloaded:
         raise RuntimeError("No usable images were downloaded. Try a more specific prompt or rerun the search.")
@@ -83,7 +94,15 @@ def run_live_retrieval(
         for candidate, embedding in zip(downloaded, image_embeddings, strict=True)
     }
     ranked = rank_candidates(downloaded, image_embeddings, text_embedding, seed_embedding, active_config)
-    selected = select_diverse(ranked, embeddings_by_path, active_config.target_count, active_config.diversity_threshold)
+
+    if active_config.exploration > 0:
+        selected = select_diverse_varied(
+            ranked, embeddings_by_path,
+            active_config.target_count, active_config.diversity_threshold,
+            active_config.exploration, rng,
+        )
+    else:
+        selected = select_diverse(ranked, embeddings_by_path, active_config.target_count, active_config.diversity_threshold)
 
     return RetrievalResult(
         brief=brief,
@@ -91,45 +110,62 @@ def run_live_retrieval(
         raw_candidate_count=len(raw_candidates),
         downloaded_count=len(downloaded),
         model_name=f"OpenCLIP {active_config.model_name} / {active_config.pretrained}",
+        exploration=active_config.exploration,
+        used_seed=used_seed,
     )
 
 
-def search_image_candidates(queries: list[str], candidate_count: int) -> list[dict[str, Any]]:
+def _ddg_query(query: str, max_results: int) -> list[dict[str, Any]]:
+    """Run a single DDG image query in an isolated thread so it can be timed out."""
     try:
         from ddgs import DDGS
-    except ImportError as exc:
-        try:
-            from duckduckgo_search import DDGS
-        except ImportError:
-            raise RetrievalDependencyError("Install ddgs with `pip install -r requirements.txt`.") from exc
+    except ImportError:
+        from duckduckgo_search import DDGS
 
+    items: list[dict[str, Any]] = []
+    with DDGS() as ddgs:
+        for item in ddgs.images(query, max_results=max_results, safesearch="moderate"):
+            image_url = item.get("image") or item.get("thumbnail")
+            if image_url:
+                items.append({
+                    "title": item.get("title") or query,
+                    "image_url": image_url,
+                    "page_url": item.get("url") or item.get("source") or image_url,
+                    "source": _domain(item.get("url") or image_url),
+                })
+    return items
+
+
+def search_image_candidates(
+    queries: list[str],
+    candidate_count: int,
+    per_query_timeout: int = 8,
+) -> list[dict[str, Any]]:
     per_query = max(8, math.ceil(candidate_count / max(1, len(queries))))
     seen: set[str] = set()
     results: list[dict[str, Any]] = []
 
-    with DDGS() as ddgs:
-        for query in queries:
-            if len(results) >= candidate_count:
-                break
-            try:
-                for item in ddgs.images(query, max_results=per_query, safesearch="moderate"):
-                    image_url = item.get("image") or item.get("thumbnail")
-                    if not image_url or image_url in seen:
-                        continue
-                    seen.add(image_url)
-                    results.append(
-                        {
-                            "title": item.get("title") or query,
-                            "image_url": image_url,
-                            "page_url": item.get("url") or item.get("source") or image_url,
-                            "source": _domain(item.get("url") or image_url),
-                        }
-                    )
-                    if len(results) >= candidate_count:
-                        break
-            except Exception:
-                continue
-            time.sleep(0.25)
+    for query in queries:
+        if len(results) >= candidate_count:
+            break
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_ddg_query, query, per_query)
+                items = future.result(timeout=per_query_timeout)
+        except _FuturesTimeout:
+            time.sleep(0.5)
+            continue
+        except Exception:
+            continue
+
+        for item in items:
+            if item["image_url"] not in seen:
+                seen.add(item["image_url"])
+                results.append(item)
+                if len(results) >= candidate_count:
+                    break
+
+        time.sleep(0.25)
 
     return results
 
@@ -234,6 +270,79 @@ def select_diverse(
         if candidate.local_path not in selected_paths:
             selected.append(candidate)
             selected_paths.add(candidate.local_path)
+
+    return selected
+
+
+_QUERY_SUFFIXES = [
+    "reference",
+    "moodboard",
+    "cinematic still",
+    "concept art",
+    "color script",
+    "character design",
+]
+
+
+def _apply_query_variation(
+    queries: list[str],
+    exploration: float,
+    rng: _random_stdlib.Random,
+) -> list[str]:
+    if not queries or exploration <= 0:
+        return queries
+    n_extra = min(4, max(2, round(exploration * 4)))
+    chosen_suffixes = rng.sample(_QUERY_SUFFIXES, n_extra)
+    base = queries[0]
+    extra = [f"{base} {suffix}" for suffix in chosen_suffixes]
+    varied = list(queries) + extra
+    rng.shuffle(varied)
+    return varied
+
+
+def select_diverse_varied(
+    ranked: list[ImageCandidate],
+    embeddings_by_path: dict[str, np.ndarray],
+    target_count: int,
+    diversity_threshold: float,
+    exploration: float,
+    rng: _random_stdlib.Random,
+) -> list[ImageCandidate]:
+    pool_size = max(target_count * 4, target_count + 10)
+    pool = ranked[:pool_size]
+
+    # Weight = score raised to 1/exploration: low exploration → sharp peak at top scores
+    scores = np.array([c.score for c in pool], dtype=float)
+    shifted = scores - scores.min() + 1e-6
+    weights = (shifted ** (1.0 / exploration)).tolist()
+
+    remaining = list(pool)
+    remaining_weights = list(weights)
+
+    selected: list[ImageCandidate] = []
+    selected_vectors: list[np.ndarray] = []
+
+    while remaining and len(selected) < target_count:
+        idx = rng.choices(range(len(remaining)), weights=remaining_weights, k=1)[0]
+        candidate = remaining[idx]
+        vector = embeddings_by_path[candidate.local_path]
+
+        if not selected_vectors or max(float(vector @ sv) for sv in selected_vectors) < diversity_threshold:
+            selected.append(candidate)
+            selected_vectors.append(vector)
+
+        remaining.pop(idx)
+        remaining_weights.pop(idx)
+
+    # Fallback: fill remaining slots deterministically from the full ranked list
+    if len(selected) < target_count:
+        selected_paths = {c.local_path for c in selected}
+        for candidate in ranked:
+            if len(selected) >= target_count:
+                break
+            if candidate.local_path not in selected_paths:
+                selected.append(candidate)
+                selected_paths.add(candidate.local_path)
 
     return selected
 

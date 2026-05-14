@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 
 from .schemas import MoodboardRequest, StyleBrief
@@ -37,15 +39,47 @@ def analyze_style(request: MoodboardRequest) -> StyleBrief:
     directive = request.directive.strip()
     normalized = directive.lower()
     style_key = _match_known_style(normalized)
-    base = STYLE_LIBRARY.get(style_key, _fallback_style(normalized))
 
     manual_context = ""
     if request.examples:
         manual_context = f" The user provided {len(request.examples)} manual example(s), so prioritize visual similarity to those seeds."
 
+    if style_key:
+        base = STYLE_LIBRARY[style_key]
+        keywords = _unique(base["keywords"] + _keywords_from_text(normalized))
+        queries = _build_queries(directive, keywords, request.examples)
+        return StyleBrief(
+            directive=directive,
+            summary=f"Collect references that express {directive} through specific, inspectable visual traits.{manual_context}",
+            keywords=keywords[:10],
+            palette=base["palette"],
+            lighting=base["lighting"],
+            composition=base["composition"],
+            texture=base["texture"],
+            negative_cues=base["negative_cues"],
+            search_queries=queries,
+        )
+
+    # Unknown style — try LLM, fall back to keyword extraction
+    llm = _llm_analyze_style(directive)
+    if llm:
+        queries = _unique(llm.get("search_queries") or _build_queries(directive, llm.get("keywords", []), request.examples))
+        return StyleBrief(
+            directive=directive,
+            summary=f"Collect references that express {directive} through specific, inspectable visual traits.{manual_context}",
+            keywords=_unique(llm.get("keywords", []))[:10],
+            palette=llm.get("palette", []),
+            lighting=llm.get("lighting", []),
+            composition=llm.get("composition", []),
+            texture=llm.get("texture", []),
+            negative_cues=llm.get("negative_cues", []),
+            search_queries=queries[:8],
+            llm_used=True,
+        )
+
+    base = _fallback_style(normalized)
     keywords = _unique(base["keywords"] + _keywords_from_text(normalized))
     queries = _build_queries(directive, keywords, request.examples)
-
     return StyleBrief(
         directive=directive,
         summary=f"Collect references that express {directive} through specific, inspectable visual traits.{manual_context}",
@@ -57,6 +91,43 @@ def analyze_style(request: MoodboardRequest) -> StyleBrief:
         negative_cues=base["negative_cues"],
         search_queries=queries,
     )
+
+
+def _llm_analyze_style(directive: str) -> dict | None:
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return None
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=600,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "You are a visual development consultant. "
+                    "Given the art-style directive below, return a JSON object with these exact fields:\n"
+                    "- keywords: list of 6-10 specific visual style keywords\n"
+                    "- palette: list of 3-5 color description strings\n"
+                    "- lighting: list of 2-4 lighting description strings\n"
+                    "- composition: list of 2-4 composition description strings\n"
+                    "- texture: list of 2-4 texture/material description strings\n"
+                    "- negative_cues: list of 3-5 visual things to avoid\n"
+                    "- search_queries: list of 5-7 image search query strings for finding reference images\n\n"
+                    f"Directive: {directive}\n\n"
+                    "Return ONLY valid JSON. No explanation, no markdown fences."
+                ),
+            }],
+        )
+        raw = message.content[0].text.strip()
+        # Strip markdown fences if the model adds them despite instructions
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-z]*\n?", "", raw)
+            raw = re.sub(r"\n?```$", "", raw)
+        return json.loads(raw)
+    except Exception:
+        return None
 
 
 def _match_known_style(normalized: str) -> str | None:
@@ -107,4 +178,3 @@ def _unique(values: list[str]) -> list[str]:
             result.append(cleaned)
             seen.add(cleaned)
     return result
-

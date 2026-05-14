@@ -4,4 +4,5 @@ __pycache__/
 .venv/
 venv/
 data/sample_runs/latest.json
-
+DEVLOG.md
+INTERVIEW_PREP.md
