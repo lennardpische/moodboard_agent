@@ -128,7 +128,7 @@ def _ddg_query(query: str, max_results: int) -> list[dict[str, Any]]:
 
     items: list[dict[str, Any]] = []
     with DDGS() as ddgs:
-        for item in ddgs.images(query, max_results=max_results, safesearch="moderate"):
+        for item in ddgs.images(query, max_results=max_results, safesearch="strict"):
             image_url = item.get("image") or item.get("thumbnail")
             if image_url:
                 items.append({
