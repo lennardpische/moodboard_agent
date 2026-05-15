@@ -309,6 +309,7 @@ def launch_dashboard() -> None:
         server_name=server_name,
         server_port=7860,
         theme=app_theme(),
+        allowed_paths=["/tmp"],
     )
 
 
