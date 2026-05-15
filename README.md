@@ -11,131 +11,126 @@ pinned: false
 license: mit
 ---
 
-# Agentic Moodboard Workflow
+# Moodboard Agent
 
-This is an initial implementation scaffold for an agent that turns an art-style directive into a curated visual reference board.
+Zero-shot visual retrieval pipeline that turns a plain-English style directive into a curated 30-image moodboard, with FLUX image generation and Midjourney `--sref` export.
 
-The interview prompt:
+**Live demo:** [lpiske-moodboard-workflow.hf.space](https://lpiske-moodboard-workflow.hf.space)
 
-> Given a style directive such as "Pixar style", optionally with manual examples, collect roughly 30-50 internet images in that style from sources like Pinterest and ShotDeck, then make the result usable for a director, prompt writer, or downstream Midjourney workflow.
+---
 
-This repo is intentionally built as a small, explainable prototype:
+## What it does
 
-- A standard-library Python workflow that analyzes a style directive, proposes search/source strategies, scores candidate references, and emits a structured moodboard run.
-- A lightweight live dashboard for launching a run and inspecting the agent's reasoning, candidates, scores, and next actions.
-- Documentation that explains the architecture, tradeoffs, and path from mock prototype to production agent.
+You type a style directive — *"Pixar style animated feature, warm family adventure, expressive characters"* — and the pipeline:
 
-## Quick Start
+1. Analyses the style into specific visual attributes (palette, lighting, composition, texture) using a built-in library for known styles or Claude Haiku for unknown ones
+2. Builds DuckDuckGo image search queries from those attributes
+3. Downloads and filters candidates (HTTP status, Content-Type, PIL verification, minimum dimensions)
+4. Embeds every image and the style brief with OpenCLIP, scores by cosine similarity, and penalises off-style content using the brief's negative cues
+5. Runs a greedy deduplication pass to ensure visual variety across the 30 selected images
+6. Generates a new image with FLUX.1-schnell using a prompt built from the brief's extracted attributes — not your original directive verbatim
+7. Exports a Midjourney `/imagine --sref` command using the actual moodboard images as style references
 
-Run the local dashboard:
+---
 
-```bash
-python3 serve_dashboard.py
+## Pipeline
+
+```
+style directive
+  → style analysis (library / Claude Haiku / keyword fallback)
+  → search query generation + variation
+  → DuckDuckGo image search (threaded, 8s timeout per query)
+  → download + 4-layer quality filtering
+  → OpenCLIP ViT-B-32 embedding (text + images)
+  → cosine similarity ranking with negative cue penalty
+  → greedy diversity deduplication (cosine threshold 0.92)
+  → 30-image moodboard
+  → FLUX.1-schnell generation (brief-derived prompt)
+  → Midjourney --sref export
 ```
 
-Then open:
+---
 
-```text
-http://localhost:8787
-```
-
-Generate a sample run from the command line:
-
-```bash
-python3 run_demo.py --directive "Pixar style animated feature, warm family adventure, expressive characters" --count 36
-```
-
-The latest run is written to:
-
-```text
-data/sample_runs/latest.json
-```
-
-## Real Retrieval Gradio App
-
-The mock dashboard above is useful for explaining orchestration. The model-backed version is `app.py`.
-
-Install dependencies:
+## Setup
 
 ```bash
 pip install -r requirements.txt
-```
-
-Run the Gradio app:
-
-```bash
 python3 app.py
 ```
 
-This version does not train anything. It uses OpenCLIP for zero-shot image/text embeddings:
+Opens at `http://127.0.0.1:7860`.
 
-```text
-directive + optional seed images
-→ DuckDuckGo image candidates
-→ image downloads
-→ OpenCLIP text/image embeddings
-→ cosine similarity ranking
-→ near-duplicate removal
-→ Gradio moodboard
+**Optional credentials** (set as environment variables or HF Spaces secrets):
+
+| Variable | What it enables |
+|---|---|
+| `ANTHROPIC_API_KEY` | Claude Haiku style analysis for unknown styles (~$0.0005/call) |
+| `HF_TOKEN` | FLUX.1-schnell image generation |
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+export HF_TOKEN=hf_...
+python3 app.py
 ```
 
-On this Mac, the heavy dependencies may be slower. For the demo path, use the Colab instructions in [colab_quickstart.md](colab_quickstart.md).
+Without these, the app still runs: known styles (Pixar, Wes Anderson, noir) use the built-in library, and the generation section requires HF_TOKEN.
 
-The Gradio interface uses the public Hugging Face theme `Nymbo/Alyx_Theme`.
+---
 
-## Current Scope
+## Controls
 
-There are now two paths:
+| Control | What it does |
+|---|---|
+| **Text weight** | Balance between style brief (text) and uploaded seed images when scoring candidates. Only active if you upload seeds. |
+| **Exploration** | 0 = fully deterministic (same seed = same moodboard). Higher values add query variation and weighted sampling from the top-ranked pool. |
+| **Dedupe threshold** | Cosine similarity cutoff for near-duplicate removal. 0.92 removes near-identical images while keeping genuine variety. |
+| **Seed images** | Upload reference images — their embeddings are averaged and blended with the text score at the ratio set by text weight. |
 
-- `serve_dashboard.py`: deterministic mock workflow for explaining architecture.
-- `app.py`: real zero-shot retrieval workflow for producing actual image moodboards.
+---
 
-The real workflow uses web image search rather than Pinterest, ShotDeck, or Midjourney automation. Those should remain planned adapters until they are implemented with accounts, permissions, and browser automation.
+## Key technical decisions
 
-The production version would replace `src/moodboard_agent/sources.py` with real adapters:
+**OpenCLIP over supervised ViT** — ViT-B-32 trained on LAION-2B embeds images and text into the same 512-dim space. This allows direct cosine similarity scoring between a style description and candidate images with no task-specific training. LAION-2B's large proportion of artistic and cinematic content gives strong zero-shot performance on style-based queries.
 
-- Pinterest search or board collection
-- ShotDeck search
-- General web image search
-- Manual example image analysis
-- Optional Midjourney upload/browser automation
+**Negative embedding** — The style brief includes `negative_cues` (e.g. for Pixar: `"photoreal horror, uncanny realism"`). Those cues are embedded and their similarity is subtracted from each candidate's score (`score − 0.3 × negative_similarity`), penalising photorealistic content in animation-style queries.
 
-## Project Layout
+**ThreadPoolExecutor timeout for DDG** — DuckDuckGo's unofficial API occasionally hangs indefinitely on rate-limited queries. Each query runs in an isolated thread with an 8-second deadline. `signal.alarm` doesn't work because Gradio runs callbacks in worker threads, not the main thread.
 
-```text
-.
-├── config/
-│   └── pipeline_config.json
-├── dashboard/
-│   ├── app.js
-│   ├── index.html
-│   └── styles.css
-├── data/
-│   └── sample_runs/
-├── docs/
-│   ├── architecture.md
-│   ├── explain-tomorrow.md
-│   └── roadmap.md
-├── run_demo.py
-├── serve_dashboard.py
-└── src/
-    └── moodboard_agent/
-        ├── __init__.py
-        ├── pipeline.py
-        ├── schemas.py
-        ├── scoring.py
-        ├── server.py
-        ├── sources.py
-        ├── storage.py
-        └── style_analysis.py
+**Seeded exploration** — The exploration slider drives weighted sampling from the top-ranked candidate pool (`score ^ (1/exploration)`) and query suffix variation. Every run's seed is displayed so any result can be reproduced exactly.
+
+**FLUX prompt from brief attributes** — The generation prompt is built from extracted keywords, palette, and lighting descriptors, not from the original directive. Diffusion models respond better to specific visual vocabulary than to human-readable style descriptions.
+
+---
+
+## Project layout
+
+```
+app.py                          — Gradio UI, event wiring, generation
+requirements.txt
+src/moodboard_agent/
+  style_analysis.py             — style brief generation (library / LLM / fallback)
+  live_retrieval.py             — full pipeline (search → embed → rank → select)
+  schemas.py                    — shared dataclasses
+  pipeline.py                   — mock pipeline (architecture reference)
+  sources.py                    — mock source adapters (Pinterest/ShotDeck stubs)
+  scoring.py                    — mock scoring (architecture reference)
+tests/
+  test_live_retrieval.py        — unit tests (exploration, diversity selection, query variation)
+  test_pipeline.py              — unit tests for mock pipeline
 ```
 
-## What To Emphasize In The Interview
+---
 
-The core idea is not "I built a scraper." The stronger framing is:
+## What a production version would add
 
-1. I decomposed the agentic workflow into clear stages.
-2. I made each stage observable and debuggable through a dashboard.
-3. I defined data contracts so real source adapters can replace mocks without changing the whole app.
-4. I separated subjective creative judgment into explicit scoring dimensions that a director can inspect and override.
-5. I left room for human-in-the-loop approval before fragile or account-sensitive steps like Pinterest/ShotDeck browsing or Midjourney uploads.
+1. **Pinterest / ShotDeck adapters** — curated sources over broad web search
+2. **Human review loop** — pin/reject UI that re-ranks remaining candidates via embedding feedback
+3. **Stable image hosting** — S3/R2 so Midjourney `--sref` URLs are permanent
+4. **IP-Adapter generation** — true image-conditioned generation (moodboard pixels in, not text)
+5. **Fine-tuned CLIP** — trained on (directive, approved image) pairs from real director sessions
+
+---
+
+## License
+
+MIT
