@@ -89,11 +89,15 @@ def run_live_retrieval(
             seed_vectors = embedder.embed_images(valid_seed_paths)
             seed_embedding = _normalize(seed_vectors.mean(axis=0, keepdims=True))[0]
 
+    negative_embedding = None
+    if brief.negative_cues:
+        negative_embedding = embedder.embed_text(" ".join(brief.negative_cues))
+
     embeddings_by_path = {
         candidate.local_path: embedding
         for candidate, embedding in zip(downloaded, image_embeddings, strict=True)
     }
-    ranked = rank_candidates(downloaded, image_embeddings, text_embedding, seed_embedding, active_config)
+    ranked = rank_candidates(downloaded, image_embeddings, text_embedding, seed_embedding, active_config, negative_embedding)
 
     if active_config.exploration > 0:
         selected = select_diverse_varied(
@@ -226,6 +230,7 @@ def rank_candidates(
     text_embedding: np.ndarray,
     seed_embedding: np.ndarray | None,
     config: RetrievalConfig,
+    negative_embedding: np.ndarray | None = None,
 ) -> list[ImageCandidate]:
     text_scores = image_embeddings @ text_embedding
     if seed_embedding is not None:
@@ -233,6 +238,11 @@ def rank_candidates(
         scores = config.text_weight * text_scores + (1.0 - config.text_weight) * seed_scores
     else:
         scores = text_scores
+
+    # Subtract similarity to negative cues (e.g. "photoreal" penalises real photos in
+    # animation-style queries, preventing off-style content like pet photography ranking well).
+    if negative_embedding is not None:
+        scores = scores - 0.3 * (image_embeddings @ negative_embedding)
 
     for candidate, score in zip(candidates, scores, strict=True):
         candidate.score = float(score)

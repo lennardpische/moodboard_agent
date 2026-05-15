@@ -97,6 +97,21 @@ def _make_style_collage(image_paths: list[str]):
         return None
 
 
+def _build_generation_prompt(scene: str, state: dict) -> str:
+    """Build a FLUX prompt from the moodboard brief — never copies the raw directive."""
+    keywords = state.get("keywords", [])
+    palette = state.get("palette", [])
+    lighting = state.get("lighting", [])
+    parts = [scene.strip()] if scene.strip() else []
+    if keywords:
+        parts.append(", ".join(keywords[:5]))
+    if palette:
+        parts.append(", ".join(palette[:2]))
+    if lighting:
+        parts.append(lighting[0])
+    return ", ".join(parts)
+
+
 def generate_preview(mj_prompt: str, state: dict):
     images = state.get("images", [])
     if not images:
@@ -119,23 +134,18 @@ def generate_preview(mj_prompt: str, state: dict):
     if collage is None:
         return None, None, "Could not load moodboard images for style reference."
 
+    flux_prompt = _build_generation_prompt(scene, state)
     try:
         from huggingface_hub import InferenceClient
         client = InferenceClient(token=token)
-        # image_to_image: collage provides visual style, scene text provides content.
-        # strength=0.65 → strong style influence from the collage, content shaped by text.
-        result = client.image_to_image(
-            image=collage,
-            prompt=scene,
-            model="stabilityai/stable-diffusion-xl-base-1.0",
-            strength=0.65,
+        result = client.text_to_image(
+            prompt=flux_prompt,
+            model="black-forest-labs/FLUX.1-schnell",
         )
         note = (
-            f"Generated using top 4 moodboard images as visual style reference.\n"
-            f"Scene: {scene}\n"
-            f"Model: SDXL img2img (strength=0.65)\n\n"
-            "The collage on the left is what was fed to the model. "
-            "Midjourney --sref achieves a similar result with stronger style fidelity."
+            f"Prompt fed to FLUX: {flux_prompt}\n\n"
+            "Style terms (keywords, palette, lighting) were extracted from the moodboard brief — "
+            "not copied from your directive. The collage shows the top 4 images whose analysis shaped the prompt."
         )
         return collage, result, note
     except Exception as exc:
@@ -253,7 +263,7 @@ def build_dashboard() -> gr.Blocks:
 
             Type a scene — the **subject** you want to create in the moodboard's style.
             Example: moodboard = Pixar style → scene = *"a young girl discovering a hidden door in a library"*.
-            The moodboard images provide the visual style; your scene provides the content.
+            The moodboard brief (keywords, palette, lighting) shapes the FLUX prompt — your directive is not reused verbatim.
             """
         )
 
@@ -283,11 +293,10 @@ def build_dashboard() -> gr.Blocks:
             label="Append style keywords from brief",
         )
 
-        # Preview (primary — works without Midjourney)
-        preview_button = gr.Button("Generate image (moodboard-guided)", variant="primary")
+        preview_button = gr.Button("Generate with FLUX (brief-guided)", variant="primary")
 
         with gr.Row():
-            collage_image = gr.Image(label="Style reference collage (fed to model)", show_label=True)
+            collage_image = gr.Image(label="Top 4 moodboard images (style extracted from these)", show_label=True)
             preview_image = gr.Image(label="Generated image", show_label=True)
         preview_note = gr.Textbox(label="Generation info", lines=4, interactive=False)
 
@@ -416,6 +425,8 @@ def run_dashboard(
         "images": images_meta,
         "directive": directive,
         "keywords": result.brief.keywords[:8],
+        "palette": result.brief.palette,
+        "lighting": result.brief.lighting,
         "url_note": url_line,
     }
 
