@@ -61,7 +61,7 @@ def analyze_style(request: MoodboardRequest) -> StyleBrief:
         )
 
     # Unknown style — try LLM, fall back to keyword extraction
-    llm = _llm_analyze_style(directive)
+    llm, llm_status = _llm_analyze_style(directive)
     if llm:
         queries = _unique(llm.get("search_queries") or _build_queries(directive, llm.get("keywords", []), request.examples))
         return StyleBrief(
@@ -75,8 +75,9 @@ def analyze_style(request: MoodboardRequest) -> StyleBrief:
             negative_cues=llm.get("negative_cues", []),
             search_queries=queries[:8],
             llm_used=True,
+            llm_error="",
         )
-
+    # LLM failed — store the reason so the UI can show it
     base = _fallback_style(normalized)
     keywords = _unique(base["keywords"] + _keywords_from_text(normalized))
     queries = _build_queries(directive, keywords, request.examples)
@@ -90,15 +91,22 @@ def analyze_style(request: MoodboardRequest) -> StyleBrief:
         texture=base["texture"],
         negative_cues=base["negative_cues"],
         search_queries=queries,
+        llm_used=False,
+        llm_error=llm_status if llm_status != "no API key" else "",
     )
 
 
-def _llm_analyze_style(directive: str) -> dict | None:
+
+def _llm_analyze_style(directive: str) -> tuple[dict | None, str]:
+    """Returns (result_dict_or_None, status_message)."""
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        return None
+        return None, "no API key"
     try:
         import anthropic
+    except ImportError:
+        return None, "anthropic package not installed"
+    try:
         client = anthropic.Anthropic(api_key=api_key)
         message = client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -121,13 +129,12 @@ def _llm_analyze_style(directive: str) -> dict | None:
             }],
         )
         raw = message.content[0].text.strip()
-        # Strip markdown fences if the model adds them despite instructions
         if raw.startswith("```"):
             raw = re.sub(r"^```[a-z]*\n?", "", raw)
             raw = re.sub(r"\n?```$", "", raw)
-        return json.loads(raw)
-    except Exception:
-        return None
+        return json.loads(raw), "ok"
+    except Exception as exc:
+        return None, str(exc)
 
 
 def _match_known_style(normalized: str) -> str | None:

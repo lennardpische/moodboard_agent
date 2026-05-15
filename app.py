@@ -40,15 +40,17 @@ def _url_note() -> str:
 
 # ── C: LLM indicator ─────────────────────────────────────────────────────────
 
-def _llm_status(llm_used: bool) -> str:
+def _llm_status(llm_used: bool, llm_error: str = "") -> str:
     if llm_used:
-        return "LLM style analysis: used (unknown style — Claude Haiku generated the brief)"
+        return "LLM style analysis: used (Claude Haiku generated the brief)"
+    if llm_error:
+        return f"LLM style analysis: failed — {llm_error}"
     if os.environ.get("ANTHROPIC_API_KEY"):
         return "LLM style analysis: available but not needed (known style matched)"
     return "LLM style analysis: OFF (set ANTHROPIC_API_KEY to enable for unknown styles)"
 
 
-# ── Preview generation (FLUX.1-schnell via HF Inference API) ─────────────────
+# ── Image-conditioned generation via HF Inference API ────────────────────────
 
 def _hf_token() -> str:
     return (
@@ -58,46 +60,86 @@ def _hf_token() -> str:
     )
 
 
-def _clean_prompt_for_hf(mj_prompt: str) -> str:
-    """Strip /imagine prefix and --flags so the text is clean for FLUX."""
+def _scene_text(mj_prompt: str) -> str:
+    """Extract only the scene/subject text — strip style keywords and all MJ flags."""
     import re
     text = re.sub(r"^/imagine prompt:\s*", "", mj_prompt)
     text = re.split(r"\s+--\w+", text)[0]
+    # Strip the style keywords appended after the first comma group if they look like brief keywords
     return text.strip()
 
 
+def _make_style_collage(image_paths: list[str]):
+    """Tile the top moodboard images into a 2×2 grid as a single style reference."""
+    try:
+        from PIL import Image as PILImage
+        import math
+        size = 512
+        cols = 2
+        paths = [p for p in image_paths[:4] if Path(p).exists()]
+        if not paths:
+            return None
+        imgs = []
+        for p in paths:
+            try:
+                imgs.append(PILImage.open(p).convert("RGB").resize((size, size)))
+            except Exception:
+                continue
+        if not imgs:
+            return None
+        rows = math.ceil(len(imgs) / cols)
+        collage = PILImage.new("RGB", (size * min(len(imgs), cols), size * rows), (20, 20, 20))
+        for i, img in enumerate(imgs):
+            col, row = i % cols, i // cols
+            collage.paste(img, (col * size, row * size))
+        return collage
+    except Exception:
+        return None
+
+
 def generate_preview(mj_prompt: str, state: dict):
-    if not state.get("images"):
-        return None, "Build a moodboard first."
+    images = state.get("images", [])
+    if not images:
+        return None, None, "Build a moodboard first."
 
     token = _hf_token()
     if not token:
-        return None, (
+        return None, None, (
             "HF_TOKEN not set.\n"
             "Get one at huggingface.co → Settings → Access Tokens, "
             "then: export HF_TOKEN=hf_... (locally) or add it as a Space secret."
         )
 
-    clean = _clean_prompt_for_hf(mj_prompt)
-    if not clean or clean == _MJ_PLACEHOLDER:
-        return None, "Type a scene above first."
+    scene = _scene_text(mj_prompt)
+    if not scene or scene == _MJ_PLACEHOLDER:
+        return None, None, "Type a scene above first."
+
+    top_paths = [img["local_path"] for img in images[:4]]
+    collage = _make_style_collage(top_paths)
+    if collage is None:
+        return None, None, "Could not load moodboard images for style reference."
 
     try:
         from huggingface_hub import InferenceClient
         client = InferenceClient(token=token)
-        image = client.text_to_image(
-            clean,
-            model="black-forest-labs/FLUX.1-schnell",
+        # image_to_image: collage provides visual style, scene text provides content.
+        # strength=0.65 → strong style influence from the collage, content shaped by text.
+        result = client.image_to_image(
+            image=collage,
+            prompt=scene,
+            model="stabilityai/stable-diffusion-xl-base-1.0",
+            strength=0.65,
         )
         note = (
-            f"FLUX.1-schnell preview\n"
-            f"Prompt: {clean}\n\n"
-            "Note: text-only — no --sref conditioning. "
-            "Midjourney with --sref will apply the moodboard images as visual style references."
+            f"Generated using top 4 moodboard images as visual style reference.\n"
+            f"Scene: {scene}\n"
+            f"Model: SDXL img2img (strength=0.65)\n\n"
+            "The collage on the left is what was fed to the model. "
+            "Midjourney --sref achieves a similar result with stronger style fidelity."
         )
-        return image, note
+        return collage, result, note
     except Exception as exc:
-        return None, f"Generation failed: {exc}"
+        return collage, None, f"Generation failed: {exc}"
 
 
 # ── Midjourney prompt builder ─────────────────────────────────────────────────
@@ -176,8 +218,8 @@ def build_dashboard() -> gr.Blocks:
                     file_count="multiple",
                 )
                 with gr.Row():
-                    target_count = gr.Slider(8, 50, value=12, step=1, label="Images in moodboard")
-                    candidate_count = gr.Slider(20, 240, value=40, step=10, label="Candidates to retrieve")
+                    target_count = gr.Slider(8, 50, value=30, step=1, label="Images in moodboard")
+                    candidate_count = gr.Slider(20, 240, value=100, step=10, label="Candidates to retrieve")
                 with gr.Row():
                     text_weight = gr.Slider(0.0, 1.0, value=0.7, step=0.05, label="Text weight")
                     diversity_threshold = gr.Slider(0.75, 0.99, value=0.92, step=0.01, label="Dedupe threshold")
@@ -190,9 +232,8 @@ def build_dashboard() -> gr.Blocks:
                 status = gr.Textbox(label="Run status", lines=5)
 
         gallery = gr.Gallery(
-            label="Selected references",
-            columns=[2, 3, 4],
-            rows=[2, 3, 4],
+            label="Moodboard",
+            columns=5,
             height="auto",
             show_label=True,
             object_fit="cover",
@@ -243,11 +284,12 @@ def build_dashboard() -> gr.Blocks:
         )
 
         # Preview (primary — works without Midjourney)
-        preview_button = gr.Button("Generate image (FLUX.1-schnell via HF)", variant="primary")
+        preview_button = gr.Button("Generate image (moodboard-guided)", variant="primary")
 
         with gr.Row():
+            collage_image = gr.Image(label="Style reference collage (fed to model)", show_label=True)
             preview_image = gr.Image(label="Generated image", show_label=True)
-            preview_note = gr.Textbox(label="Generation info", lines=5, interactive=False)
+        preview_note = gr.Textbox(label="Generation info", lines=4, interactive=False)
 
         # Midjourney (secondary — copy-paste workflow)
         gr.Markdown(
@@ -279,7 +321,7 @@ def build_dashboard() -> gr.Blocks:
         preview_button.click(
             fn=generate_preview,
             inputs=[mj_prompt_output, mj_state],
-            outputs=[preview_image, preview_note],
+            outputs=[collage_image, preview_image, preview_note],
         )
 
         gr.Examples(
@@ -344,7 +386,7 @@ def run_dashboard(
         for idx, item in enumerate(result.selected)
     ]
 
-    llm_line = _llm_status(result.brief.llm_used)
+    llm_line = _llm_status(result.brief.llm_used, result.brief.llm_error)
     url_line = _url_note()
     status = (
         f"Collected {result.downloaded_count} usable image(s) from {result.raw_candidate_count} raw candidate(s).\n"

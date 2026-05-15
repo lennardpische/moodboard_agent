@@ -32,6 +32,7 @@ class StyleBrief:
     negative_cues: list[str]
     search_queries: list[str]
     llm_used: bool = False
+    llm_error: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

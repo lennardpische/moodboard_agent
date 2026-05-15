@@ -23,8 +23,8 @@ USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36
 
 @dataclass
 class RetrievalConfig:
-    target_count: int = 12
-    candidate_count: int = 40
+    target_count: int = 30
+    candidate_count: int = 100
     text_weight: float = 0.7
     diversity_threshold: float = 0.92
     request_timeout_seconds: int = 12
